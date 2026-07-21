@@ -26,6 +26,7 @@ from aiogram.types import (
 from config import settings
 from core.db import SessionLocal, init_db
 from core.export.excel import build_ledger_from_statement
+from core.export.yadisk import YaDiskError, upload_xlsx
 from core.parsing.pud_ingest import extract_text, find_formula, find_title
 from core.parsing.pud_parser import parse_formula
 from core.parsing.text_parser import parse_grades
@@ -51,6 +52,7 @@ def main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="✍️ Ввести оценки", callback_data="enter")],
         [InlineKeyboardButton(text="👀 Показать ведомость", callback_data="show")],
         [InlineKeyboardButton(text="📊 Выгрузить Excel", callback_data="export")],
+        [InlineKeyboardButton(text="☁️ В Яндекс.Диск (таблица)", callback_data="export_yadisk")],
     ])
 
 
@@ -305,6 +307,43 @@ async def on_export(cb: CallbackQuery) -> None:
         tmp.unlink()
     except OSError:
         pass
+
+
+@dp.callback_query(F.data == "export_yadisk")
+async def on_export_yadisk(cb: CallbackQuery) -> None:
+    if not settings.yadisk_enabled:
+        await cb.message.answer(
+            "☁️ Интеграция с Яндекс.Диском готова, но нужен токен доступа.\n"
+            "Получить OAuth-токен для Диска: https://yandex.ru/dev/disk/poligon/ — "
+            "и добавить его как YANDEX_DISK_TOKEN. После этого ведомость будет "
+            "выгружаться в Яндекс-таблицу одной кнопкой."
+        )
+        await cb.answer()
+        return
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, cb.from_user.id)
+        st = svc.active_statement(s, teacher)
+        if st is None:
+            await cb.message.answer("Нет активной ведомости для выгрузки.")
+            await cb.answer()
+            return
+        wb = build_ledger_from_statement(s, st)
+        course, sid = st.course_name, st.id
+    tmp = Path(tempfile.gettempdir()) / f"vedomost_{sid}.xlsx"
+    wb.save(tmp)
+    await cb.message.answer("⏳ Выгружаю в Яндекс.Диск…")
+    try:
+        url = upload_xlsx(str(tmp), f"Ведомость — {course}.xlsx")
+        await cb.message.answer(f"☁️ Готово. Открыть как таблицу в Яндекс Документах:\n{url}",
+                                reply_markup=main_menu())
+    except YaDiskError as e:
+        await cb.message.answer(f"Ошибка выгрузки на Яндекс.Диск: {e}")
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    await cb.answer()
 
 
 async def _handle_grades(message: Message, state: FSMContext, text: str, source: str) -> None:

@@ -33,9 +33,16 @@ class Settings(BaseSettings):
     ai_model_uri: str = "gpt://b1gvtru3guuc1oipcs4p/qwen3.6-35b-a3b/latest"
     stt_folder_id: str = "b1gvtru3guuc1oipcs4p"  # folderId для SpeechKit (тоже дом. каталог SA)
 
+    # Яндекс.Диск (авто-выгрузка ведомости как редактируемой таблицы в Яндекс Документах)
+    yandex_disk_token: str = Field(default="", validation_alias="YANDEX_DISK_TOKEN")
+
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_api_key)
+
+    @property
+    def yadisk_enabled(self) -> bool:
+        return bool(self.yandex_disk_token)
 
     @property
     def allowed_ids(self) -> set[int]:
