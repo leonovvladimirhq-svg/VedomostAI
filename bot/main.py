@@ -26,9 +26,9 @@ from aiogram.types import (
 from config import settings
 from core.db import SessionLocal, init_db
 from core.export.excel import build_ledger_from_statement
+from core.parsing.pud_ingest import extract_text, find_formula, find_title
 from core.parsing.pud_parser import parse_formula
 from core.services import statement_service as svc
-from core.services.grading_service import seminar_scheme
 from seed.test_group import seed as seed_group
 
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +36,8 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 class Flow(StatesGroup):
-    waiting_formula = State()   # ручной ввод формулы ПУД
+    waiting_pud = State()       # ожидание файла ПУД (или вставленной формулы)
+    confirming = State()        # подтверждение распознанной структуры
     entering_value = State()    # ввод числовой оценки после выбора элемента+студента
 
 
@@ -50,11 +51,10 @@ def main_menu() -> InlineKeyboardMarkup:
     ])
 
 
-def preset_menu() -> InlineKeyboardMarkup:
+def confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎭 Драматургия (ПУД, 4 элемента)", callback_data="preset:dram")],
-        [InlineKeyboardButton(text="📝 Семинарская (0.6 занятия + 0.4 отчёт)", callback_data="preset:sem")],
-        [InlineKeyboardButton(text="⌨️ Ввести формулу вручную", callback_data="preset:manual")],
+        [InlineKeyboardButton(text="✅ Подтвердить и создать", callback_data="pud_ok")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="pud_cancel")],
     ])
 
 
@@ -74,10 +74,6 @@ def students_kb(students) -> InlineKeyboardMarkup:
     if row:
         rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-DRAMATURGY_FORMULA = ("Активность * 0.1 + Блиц * 0.2 + "
-                      "Тест по лекционным материалам: Викторина * 0.2 + Контрольная работа * 0.5")
 
 
 # --- Хендлеры ---
@@ -100,70 +96,91 @@ async def on_start(message: Message, state: FSMContext) -> None:
 
 
 @dp.callback_query(F.data == "new")
-async def on_new(cb: CallbackQuery) -> None:
-    await cb.message.answer("Выберите структуру ведомости (из ПУД):", reply_markup=preset_menu())
-    await cb.answer()
-
-
-async def _create(cb: CallbackQuery, engine_scheme, course: str, module: str) -> None:
-    with SessionLocal() as s:
-        teacher = svc.get_or_create_teacher(s, cb.from_user.id)
-        group = seed_group(s)
-        st = svc.create_statement_with_scheme(s, teacher, group, engine_scheme,
-                                              course_name=course, module=module)
-        els = svc.scheme_elements(s, st)
-        names = "\n".join(f"• {e.name} — вес {e.weight:g}" for e in els)
-        sid = st.id
+async def on_new(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(Flow.waiting_pud)
     await cb.message.answer(
-        f"✅ Создана ведомость #{sid}: <b>{course}</b> ({module}), статус «Заполняется».\n"
-        f"Элементы контроля:\n{names}\n\nТеперь можно вводить оценки — «✍️ Ввести оценки».",
-        reply_markup=main_menu(), parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data == "preset:dram")
-async def on_preset_dram(cb: CallbackQuery) -> None:
-    await _create(cb, parse_formula(DRAMATURGY_FORMULA), "Драматургия в рекламе и PR", "3 модуль")
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "preset:sem")
-async def on_preset_sem(cb: CallbackQuery) -> None:
-    await _create(cb, seminar_scheme(), "Семинарская ведомость", "3–4 модули")
-    await cb.answer()
-
-
-@dp.callback_query(F.data == "preset:manual")
-async def on_preset_manual(cb: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(Flow.waiting_formula)
-    await cb.message.answer(
-        "Пришлите формулу оценивания в формате:\n"
-        "<code>Активность * 0.1 + Блиц * 0.2 + Контрольная * 0.7</code>",
+        "Пришлите ваш <b>ПУД файлом</b> (PDF, DOCX или HTML из конструктора dp.hse.ru) — "
+        "я извлеку элементы контроля и веса из вашей формулы оценивания.\n\n"
+        "Можно также вставить раздел «Система оценивания» или формулу текстом.",
         parse_mode="HTML",
     )
     await cb.answer()
 
 
-@dp.message(Flow.waiting_formula, F.text)
-async def on_formula(message: Message, state: FSMContext) -> None:
-    try:
-        scheme = parse_formula(message.text.strip())
-    except Exception:
-        await message.answer("Не удалось разобрать формулу. Пример: «Актив * 0.3 + Экзамен * 0.7».")
+async def _present_detected(message: Message, state: FSMContext, text: str) -> None:
+    """Показывает распознанную из ПУД структуру и просит подтверждение."""
+    formula = find_formula(text)
+    if not formula:
+        await message.answer(
+            "Не нашёл формулу оценивания в ПУД. Пришлите раздел «Система оценивания» "
+            "текстом или другой файл (PDF/DOCX/HTML)."
+        )
         return
+    try:
+        scheme = parse_formula(formula)
+    except Exception:
+        await message.answer("Формула найдена, но не разобралась. Пришлите её текстом.")
+        return
+    title = find_title(text)
+    await state.update_data(formula=formula, title=title)
+    await state.set_state(Flow.confirming)
+    names = "\n".join(f"• {e.name} — вес {e.weight:g}" for e in scheme.elements)
+    total_w = scheme.check_weights()
+    warn = "" if total_w == 1.0 else f"\n⚠️ Сумма весов = {total_w:g} (обычно 1.0)"
+    await message.answer(
+        f"📋 Распознал ПУД: <b>{title}</b>\nЭлементы контроля:\n{names}{warn}\n\nВсё верно?",
+        reply_markup=confirm_kb(), parse_mode="HTML",
+    )
+
+
+@dp.message(Flow.waiting_pud, F.document)
+async def on_pud_document(message: Message, state: FSMContext) -> None:
+    doc = message.document
+    suffix = Path(doc.file_name or "pud").suffix or ".bin"
+    tmp = Path(tempfile.gettempdir()) / f"pud_{message.from_user.id}{suffix}"
+    await message.bot.download(doc, destination=tmp)
+    try:
+        text = extract_text(str(tmp))
+    except Exception as e:
+        await message.answer(f"Не смог прочитать файл: {e}")
+        return
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    await _present_detected(message, state, text)
+
+
+@dp.message(Flow.waiting_pud, F.text)
+async def on_pud_text(message: Message, state: FSMContext) -> None:
+    await _present_detected(message, state, message.text)
+
+
+@dp.callback_query(Flow.confirming, F.data == "pud_ok")
+async def on_pud_ok(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    formula, title = data.get("formula"), data.get("title", "Ведомость по ПУД")
     await state.clear()
     with SessionLocal() as s:
-        teacher = svc.get_or_create_teacher(s, message.from_user.id)
+        teacher = svc.get_or_create_teacher(s, cb.from_user.id)
         group = seed_group(s)
-        st = svc.create_statement_with_scheme(s, teacher, group, scheme,
-                                              course_name="Ведомость по формуле", module="")
-        els = svc.scheme_elements(s, st)
-        names = "\n".join(f"• {e.name} — вес {e.weight:g}" for e in els)
+        st = svc.create_statement_with_scheme(s, teacher, group, parse_formula(formula),
+                                              course_name=title, module="")
         sid = st.id
-    await message.answer(
-        f"✅ Создана ведомость #{sid}. Элементы:\n{names}",
-        reply_markup=main_menu(),
+    await cb.message.answer(
+        f"✅ Ведомость #{sid} создана: <b>{title}</b>, статус «Заполняется».\n"
+        f"Теперь вводите оценки — «✍️ Ввести оценки».",
+        reply_markup=main_menu(), parse_mode="HTML",
     )
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "pud_cancel")
+async def on_pud_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.message.answer("Отменил. /start — меню.")
+    await cb.answer()
 
 
 @dp.callback_query(F.data == "enter")
