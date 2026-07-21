@@ -28,6 +28,8 @@ from core.db import SessionLocal, init_db
 from core.export.excel import build_ledger_from_statement
 from core.parsing.pud_ingest import extract_text, find_formula, find_title
 from core.parsing.pud_parser import parse_formula
+from core.parsing.text_parser import parse_grades
+from core.parsing.voice import transcribe
 from core.services import statement_service as svc
 from seed.test_group import seed as seed_group
 
@@ -36,9 +38,10 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 class Flow(StatesGroup):
-    waiting_pud = State()       # ожидание файла ПУД (или вставленной формулы)
-    confirming = State()        # подтверждение распознанной структуры
-    entering_value = State()    # ввод числовой оценки после выбора элемента+студента
+    waiting_pud = State()          # ожидание файла ПУД (или вставленной формулы)
+    confirming = State()           # подтверждение распознанной структуры ПУД
+    entering_value = State()       # ввод числовой оценки после выбора элемента+студента
+    confirming_grades = State()    # подтверждение оценок, распознанных из текста/голоса
 
 
 # --- Клавиатуры ---
@@ -55,6 +58,13 @@ def confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Подтвердить и создать", callback_data="pud_ok")],
         [InlineKeyboardButton(text="✖️ Отмена", callback_data="pud_cancel")],
+    ])
+
+
+def grades_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Записать", callback_data="grades_ok")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="grades_cancel")],
     ])
 
 
@@ -297,14 +307,110 @@ async def on_export(cb: CallbackQuery) -> None:
         pass
 
 
+async def _handle_grades(message: Message, state: FSMContext, text: str, source: str) -> None:
+    """Общий конвейер для оценок из текста и голоса: разбор Qwen -> сопоставление с БД
+    -> превью -> подтверждение (запись в on_grades_ok)."""
+    from core.models import Group
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, message.from_user.id)
+        st = svc.active_statement(s, teacher)
+        if st is None:
+            await message.answer("Сначала создайте ведомость — «📄 Новая ведомость».")
+            return
+        group = s.get(Group, st.group_id)
+        roster_names = [x.full_name for x in svc.roster(s, group)]
+        el_names = [e.name for e in svc.scheme_elements(s, st)]
+    try:
+        parsed = parse_grades(text, roster_names, el_names)
+    except Exception as e:
+        await message.answer(f"Не смог распознать оценки: {e}")
+        return
+
+    resolved, labels = [], []
+    from core.models import Group as G
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, message.from_user.id)
+        st = svc.active_statement(s, teacher)
+        group = s.get(G, st.group_id)
+        students = svc.roster(s, group)
+        elements = svc.scheme_elements(s, st)
+        for p in parsed:
+            stu = svc.match_student(students, p.student)
+            el = svc.match_element(elements, p.element)
+            if stu and el and 0 <= p.value <= 10:
+                resolved.append((stu.id, el.id, p.value))
+                labels.append(f"• {stu.full_name.split()[0]} — {el.name} = {p.value:g}")
+
+    if not resolved:
+        await message.answer(
+            f"Распознанный текст: «{text}»\nНо оценки не понял. "
+            f"Пример: «за блиц Иванов 8, Петрова 3»."
+        )
+        return
+
+    await state.update_data(pending=resolved, source=source)
+    await state.set_state(Flow.confirming_grades)
+    head = f"🗣 Распознал: «{text}»\n\n" if source == "voice" else ""
+    await message.answer(head + "Записать эти оценки?\n" + "\n".join(labels),
+                         reply_markup=grades_confirm_kb())
+
+
 @dp.message(F.voice)
-async def on_voice(message: Message) -> None:
-    await message.answer("🎙 Голосовой ввод подключается следующим шагом (SpeechKit + Qwen).")
+async def on_voice(message: Message, state: FSMContext) -> None:
+    if not settings.ai_enabled:
+        await message.answer("Голосовой ввод недоступен: не настроен YC_API_KEY.")
+        return
+    await message.answer("⏳ Распознаю голос…")
+    file = await message.bot.get_file(message.voice.file_id)
+    buf = await message.bot.download_file(file.file_path)
+    try:
+        text = transcribe(buf.read())
+    except Exception as e:
+        await message.answer(f"Не смог распознать голос: {e}")
+        return
+    if not text.strip():
+        await message.answer("Пустая транскрипция — повторите чётче.")
+        return
+    await _handle_grades(message, state, text, "voice")
+
+
+@dp.callback_query(Flow.confirming_grades, F.data == "grades_ok")
+async def on_grades_ok(cb: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    pending, source = data.get("pending", []), data.get("source", "text")
+    await state.clear()
+    from core.models import ControlElement, Student
+    recorded = 0
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, cb.from_user.id)
+        st = svc.active_statement(s, teacher)
+        for sid, eid, val in pending:
+            svc.add_grade_entry(s, st, s.get(Student, sid), s.get(ControlElement, eid),
+                                val, source, teacher)
+            recorded += 1
+    await cb.message.answer(f"✅ Записано оценок: {recorded}.", reply_markup=main_menu())
+    await cb.answer()
+
+
+@dp.callback_query(F.data == "grades_cancel")
+async def on_grades_cancel(cb: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await cb.message.answer("Отменил. /start — меню.")
+    await cb.answer()
 
 
 @dp.message(F.text)
-async def on_text_fallback(message: Message) -> None:
-    await message.answer("Наберите /start для меню. Разбор текста-потока оценок — следующий шаг.")
+async def on_text_fallback(message: Message, state: FSMContext) -> None:
+    txt = message.text.strip()
+    # эвристика: есть цифра + есть API-ключ -> пробуем разобрать как оценки
+    if settings.ai_enabled and any(ch.isdigit() for ch in txt):
+        await message.answer("⏳ Распознаю…")
+        await _handle_grades(message, state, txt, "text")
+        return
+    await message.answer(
+        "Наберите /start для меню. Оценки можно вводить кнопками, "
+        "текстом («за блиц Иванов 8, Петрова 3») или голосом."
+    )
 
 
 async def _run() -> None:

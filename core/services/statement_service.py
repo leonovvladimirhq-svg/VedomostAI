@@ -151,3 +151,29 @@ def active_statement(session: Session, teacher: Teacher) -> Statement | None:
             Statement.status == StatementStatus.FILLING,
         ).order_by(Statement.id.desc())
     )
+
+
+# --- Сопоставление распознанного (текст/голос) с БД ---
+def match_student(students: list[Student], query: str) -> Student | None:
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    for st in students:  # точное ФИО
+        if st.full_name.lower() == q:
+            return st
+    surname = q.split()[0]  # по фамилии (первое слово)
+    cands = [st for st in students if st.full_name.lower().split()[0] == surname]
+    return cands[0] if len(cands) == 1 else None
+
+
+def match_element(elements: list[ControlElement], query: str) -> ControlElement | None:
+    q = (query or "").strip().lower()
+    if not q:
+        return None
+    for e in elements:  # точное имя
+        if e.name.lower() == q:
+            return e
+    for e in elements:  # частичное совпадение
+        if q in e.name.lower() or e.name.lower() in q:
+            return e
+    return None

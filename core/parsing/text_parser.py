@@ -1,26 +1,46 @@
-"""Разбор текста-потока: «Иванов 8, Петров 3» -> [(студент, элемент, оценка)].
-
-СТАТУС: заглушка интерфейса. Реализация — через Yandex AI Studio (лёгкий LLM),
-доступ есть через ваш Yandex Cloud. Для включения нужно:
-  * подтвердить модель AI Studio (в плане — Qwen3-235B) и выдать роль ai.languageModels.user;
-  * список студентов группы (для сопоставления ФИО, разрешения однофамильцев);
-  * список элементов контроля (чтобы понять, за какой контроль оценка).
-Результат ВСЕГДА показывается преподавателю на подтверждение (цена ошибки в ФИО/цифре).
-"""
+"""Разбор текста-потока оценок через Qwen: «за блиц Иванов 8, Петров 3» ->
+[(студент, элемент, оценка)]. Результат ВСЕГДА показывается преподавателю на
+подтверждение (цена ошибки в ФИО/цифре высока — раздел 7 плана)."""
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
+
+from core.services.llm import chat
+
+_SYS = (
+    "Ты извлекаешь оценки из реплики преподавателя. "
+    "Верни ТОЛЬКО JSON-массив объектов вида "
+    '{"student": <точное ФИО из списка студентов>, '
+    '"element": <точное название элемента контроля из списка>, '
+    '"value": <число оценки>}. '
+    "Если элемент назван один раз для нескольких студентов — примени его ко всем. "
+    "Если студента или элемента нет в списках — пропусти запись. Без пояснений, только JSON."
+)
 
 
 @dataclass
 class ParsedGrade:
-    student_query: str   # как распознано ФИО (для матчинга/уточнения однофамильцев)
-    element_query: str   # к какому элементу контроля отнесено
+    student: str
+    element: str
     value: float
-    raw: str             # исходный фрагмент
 
 
-def parse_text(text: str, roster: list[str], elements: list[str]) -> list[ParsedGrade]:  # pragma: no cover
-    raise NotImplementedError(
-        "NLP-разбор ввода подключается через Yandex AI Studio. См. список материалов."
-    )
+def parse_grades(text: str, roster_names: list[str], element_names: list[str]) -> list[ParsedGrade]:
+    usr = f"Студенты: {roster_names}\nЭлементы контроля: {element_names}\nРеплика: \"{text}\""
+    content = chat([{"role": "system", "content": _SYS}, {"role": "user", "content": usr}])
+    m = re.search(r"\[.*\]", content, re.S)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+    out: list[ParsedGrade] = []
+    for x in data:
+        try:
+            out.append(ParsedGrade(str(x["student"]), str(x["element"]), float(x["value"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
