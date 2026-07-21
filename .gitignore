@@ -1,0 +1,27 @@
+# --- СЕКРЕТЫ: никогда не коммитить ---
+*.json            # ключи сервисных аккаунтов Yandex Cloud (leonov-deployer-key.json и пр.)
+!example*.json    # кроме файлов-примеров
+.env
+.env.*
+!.env.example
+
+# --- Локальная БД / временные файлы ---
+*.db
+*.sqlite
+*.sqlite3
+/tmp_audio/
+*.ogg
+*.oga
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# --- IDE ---
+.vscode/
+.idea/
