@@ -77,6 +77,9 @@ class ControlElement(Base):
     scheme_id: Mapped[int] = mapped_column(ForeignKey("grading_schemes.id"), index=True)
     name: Mapped[str] = mapped_column(String(150))
     weight: Mapped[float] = mapped_column(Float, default=0.0)
+    # single = одна оценка (правка = последняя актуальна); average = среднее по вводам
+    aggregation: Mapped[str] = mapped_column(String(10), default="single")
+    gates_total: Mapped[bool] = mapped_column(Boolean, default=False)  # нет вводов -> итог 0
     is_blocking: Mapped[bool] = mapped_column(Boolean, default=False)
     blocking_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     planned_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -9,7 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from core.models import (
-    ControlElement, GradeEntry, Group, Statement, Student, Teacher,
+    ControlElement, GradeEntry, GradingScheme, Group, Statement, Student, Teacher,
+)
+from core.services.grading_service import (
+    Element as EngineElement, GradeResult, Scheme as EngineScheme, compute,
 )
 from core.statuses import StatementStatus, assert_transition
 
@@ -74,3 +77,77 @@ def roster(session: Session, group: Group) -> list[Student]:
     return session.scalars(
         select(Student).where(Student.group_id == group.id).order_by(Student.full_name)
     ).all()
+
+
+# --- Мост БД <-> расчётный движок (контур 1–2, генерация) ---
+def create_statement_with_scheme(
+    session: Session, teacher: Teacher, group: Group, engine_scheme: EngineScheme,
+    *, course_name: str = "", module: str = "",
+) -> Statement:
+    """Создаёт ведомость + сохраняет структуру расчёта (GradingScheme + элементы) из
+    движковой схемы (полученной, напр., парсингом ПУД). Статус сразу «Заполняется»."""
+    scheme = GradingScheme(rounding_mode=engine_scheme.rounding)
+    session.add(scheme)
+    session.flush()
+    for e in engine_scheme.elements:
+        session.add(ControlElement(
+            scheme_id=scheme.id, name=e.name, weight=e.weight, aggregation=e.aggregation,
+            gates_total=e.gates_total, is_blocking=e.is_blocking,
+            blocking_threshold=e.blocking_threshold,
+        ))
+    st = Statement(
+        teacher_id=teacher.id, group_id=group.id, scheme_id=scheme.id,
+        course_name=course_name, module=module, status=StatementStatus.FILLING,
+    )
+    session.add(st)
+    session.commit()
+    return st
+
+
+def scheme_elements(session: Session, statement: Statement) -> list[ControlElement]:
+    return session.scalars(
+        select(ControlElement).where(ControlElement.scheme_id == statement.scheme_id)
+        .order_by(ControlElement.id)
+    ).all()
+
+
+def build_engine_scheme(session: Session, statement: Statement) -> EngineScheme:
+    """Собирает движковую схему из БД (ключ элемента = его id как строка)."""
+    els = scheme_elements(session, statement)
+    scheme = session.get(GradingScheme, statement.scheme_id)
+    return EngineScheme(
+        elements=[EngineElement(
+            key=str(e.id), name=e.name, weight=e.weight, aggregation=e.aggregation,
+            gates_total=e.gates_total, is_blocking=e.is_blocking,
+            blocking_threshold=e.blocking_threshold,
+        ) for e in els],
+        rounding=scheme.rounding_mode,
+    )
+
+
+def entries_for_student(session: Session, statement: Statement, student: Student) -> dict[str, list[float]]:
+    """Все вводы студента по элементам (append-only, в порядке времени)."""
+    rows = session.scalars(
+        select(GradeEntry).where(
+            GradeEntry.statement_id == statement.id,
+            GradeEntry.student_id == student.id,
+        ).order_by(GradeEntry.created_at.asc())
+    ).all()
+    d: dict[str, list[float]] = {}
+    for e in rows:
+        d.setdefault(str(e.element_id), []).append(e.value)
+    return d
+
+
+def student_total(session: Session, statement: Statement, student: Student) -> GradeResult:
+    return compute(build_engine_scheme(session, statement), entries_for_student(session, statement, student))
+
+
+def active_statement(session: Session, teacher: Teacher) -> Statement | None:
+    """Последняя ведомость преподавателя в статусе «Заполняется»."""
+    return session.scalar(
+        select(Statement).where(
+            Statement.teacher_id == teacher.id,
+            Statement.status == StatementStatus.FILLING,
+        ).order_by(Statement.id.desc())
+    )

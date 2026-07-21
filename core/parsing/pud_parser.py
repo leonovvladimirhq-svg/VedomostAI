@@ -32,8 +32,10 @@ def parse_formula(formula: str, rounding: str = "arithmetic") -> Scheme:
             continue
         name = m.group("name").strip()
         weight = float(m.group("weight").replace(",", "."))
+        # single = одна оценка за элемент, правка перезаписывает (latest-wins). Усреднение
+        # нескольких контролей (Блиц×2, семинары) — отдельный режим, задаётся вручную.
         elements.append(Element(key=f"{_slug(name)}_{i}", name=name, weight=weight,
-                                aggregation="average"))
+                                aggregation="single"))
     if not elements:
         raise ValueError(f"Не удалось разобрать формулу: {formula!r}")
     return Scheme(elements=elements, rounding=rounding)

@@ -63,3 +63,44 @@ def build_ledger(
 def save_ledger(path: str, *args, **kwargs) -> str:
     build_ledger(*args, **kwargs).save(path)
     return path
+
+
+def build_ledger_from_statement(session, statement) -> Workbook:
+    """Генерирует Excel по ведомости из БД: студенты × элементы + Итог (через движок)."""
+    from core.models import Group
+    from core.services import statement_service as svc
+
+    group = session.get(Group, statement.group_id)
+    students = svc.roster(session, group)
+    els = svc.scheme_elements(session, statement)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Ведомость"
+    title = f"{statement.course_name} — {statement.module}".strip(" —")
+    if title:
+        ws.cell(1, 1, title).font = Font(bold=True, size=13)
+
+    header = ["№", "ФИО"] + [f"{e.name} ({e.weight:g})" for e in els] + ["Итог"]
+    for c, name in enumerate(header, start=1):
+        cell = ws.cell(2, c, name)
+        cell.font = _BOLD
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+    for i, stu in enumerate(students, start=1):
+        row = 2 + i
+        ws.cell(row, 1, i)
+        ws.cell(row, 2, stu.full_name)
+        ent = svc.entries_for_student(session, statement, stu)
+        res = svc.student_total(session, statement, stu)
+        for ci, e in enumerate(els, start=3):
+            has = bool(ent.get(str(e.id)))
+            ws.cell(row, ci, round(res.aggregated.get(str(e.id), 0), 2) if has else None)
+        ws.cell(row, 3 + len(els), res.total)
+
+    ws.column_dimensions["A"].width = 4
+    ws.column_dimensions["B"].width = 32
+    for ci in range(3, 3 + len(els) + 1):
+        ws.column_dimensions[get_column_letter(ci)].width = 16
+    return wb
