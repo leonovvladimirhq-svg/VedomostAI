@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # Яндекс.Диск (авто-выгрузка ведомости как редактируемой таблицы в Яндекс Документах)
     yandex_disk_token: str = Field(default="", validation_alias="YANDEX_DISK_TOKEN")
 
+    # Напоминания преподавателю по неактивным ведомостям (контур 4).
+    # Прод-порог = 240 ч (10 дней); на тест ставим 24 (см. .env на VM).
+    reminder_inactivity_hours: int = Field(default=240, validation_alias="REMINDER_INACTIVITY_HOURS")
+    reminder_check_interval_min: int = Field(default=60, validation_alias="REMINDER_CHECK_INTERVAL_MIN")
+    # Месяцы без напоминаний (напр. лето): "6,8". Пусто = напоминаем всегда (для теста).
+    reminder_skip_months: str = Field(default="", validation_alias="REMINDER_SKIP_MONTHS")
+
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_api_key)
@@ -43,6 +50,10 @@ class Settings(BaseSettings):
     @property
     def yadisk_enabled(self) -> bool:
         return bool(self.yandex_disk_token)
+
+    @property
+    def reminder_skip_month_set(self) -> set[int]:
+        return {int(p) for p in self.reminder_skip_months.split(",") if p.strip().isdigit()}
 
     @property
     def allowed_ids(self) -> set[int]:

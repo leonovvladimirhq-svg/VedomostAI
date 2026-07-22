@@ -12,10 +12,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -31,7 +32,9 @@ from core.parsing.pud_ingest import extract_text, find_formula, find_title
 from core.parsing.pud_parser import parse_formula
 from core.parsing.text_parser import parse_grades
 from core.parsing.voice import transcribe
+from core.services import reminder_service as rem
 from core.services import statement_service as svc
+from core.services.grading_service import GRADE_MIN, element_max
 from seed.test_group import seed as seed_group
 
 logging.basicConfig(level=logging.INFO)
@@ -238,10 +241,7 @@ async def on_value(message: Message, state: FSMContext) -> None:
     try:
         value = float(raw)
     except ValueError:
-        await message.answer("Нужно число 0–10. Повторите ввод.")
-        return
-    if not 0 <= value <= 10:
-        await message.answer("Оценка вне шкалы 0–10. Повторите ввод.")
+        await message.answer("Нужно число. Введите оценку по шкале 0–10 ещё раз:")
         return
     data = await state.get_data()
     element_id, student_id = data.get("element_id"), data.get("student_id")
@@ -251,6 +251,14 @@ async def on_value(message: Message, state: FSMContext) -> None:
         st = svc.active_statement(s, teacher)
         student = s.get(Student, student_id)
         element = s.get(ControlElement, element_id)
+        emax = element_max(element)
+        # #5: детектор «вне диапазона» — жёсткая валидация ввода (остаёмся в состоянии ввода).
+        if not GRADE_MIN <= value <= emax:
+            await message.answer(
+                f"К сожалению, за «{element.name}» можно поставить максимум {emax:g} "
+                f"(шкала {GRADE_MIN:g}–{emax:g}). Больше поставить нельзя — введите оценку ещё раз:"
+            )
+            return
         svc.add_grade_entry(s, st, student, element, value, "buttons", teacher, raw_input=message.text)
         res = svc.student_total(s, st, student)
         surname = student.full_name.split()[0]
@@ -365,7 +373,7 @@ async def _handle_grades(message: Message, state: FSMContext, text: str, source:
         await message.answer(f"Не смог распознать оценки: {e}")
         return
 
-    resolved, labels = [], []
+    resolved, labels, rejected = [], [], []
     from core.models import Group as G
     with SessionLocal() as s:
         teacher = svc.get_or_create_teacher(s, message.from_user.id)
@@ -376,21 +384,28 @@ async def _handle_grades(message: Message, state: FSMContext, text: str, source:
         for p in parsed:
             stu = svc.match_student(students, p.student)
             el = svc.match_element(elements, p.element)
-            if stu and el and 0 <= p.value <= 10:
+            if not (stu and el):
+                continue
+            emax = element_max(el)
+            if GRADE_MIN <= p.value <= emax:  # #5: только оценки в шкале записываем
                 resolved.append((stu.id, el.id, p.value))
                 labels.append(f"• {stu.full_name.split()[0]} — {el.name} = {p.value:g}")
+            else:
+                rejected.append(f"• {stu.full_name.split()[0]} — {el.name}: {p.value:g} вне шкалы {GRADE_MIN:g}–{emax:g}")
 
     if not resolved:
+        note = ("\n\n⚠️ Вне шкалы, не записал:\n" + "\n".join(rejected)) if rejected else ""
         await message.answer(
             f"Распознанный текст: «{text}»\nНо оценки не понял. "
-            f"Пример: «за блиц Иванов 8, Петрова 3»."
+            f"Пример: «за блиц Иванов 8, Петрова 3»." + note
         )
         return
 
     await state.update_data(pending=resolved, source=source)
     await state.set_state(Flow.confirming_grades)
     head = f"🗣 Распознал: «{text}»\n\n" if source == "voice" else ""
-    await message.answer(head + "Записать эти оценки?\n" + "\n".join(labels),
+    tail = ("\n\n⚠️ Вне шкалы (не запишу):\n" + "\n".join(rejected)) if rejected else ""
+    await message.answer(head + "Записать эти оценки?\n" + "\n".join(labels) + tail,
                          reply_markup=grades_confirm_kb())
 
 
@@ -452,12 +467,72 @@ async def on_text_fallback(message: Message, state: FSMContext) -> None:
     )
 
 
+# --- Напоминания (контур 4): фоновый цикл + ручной триггер ---
+_last_reminded: dict[int, datetime] = {}  # statement_id -> когда напомнили (дедуп в процессе)
+
+
+async def _send_reminders(bot: Bot, *, force: bool = False) -> int:
+    """Проверяет неактивные ведомости и шлёт напоминания преподавателям.
+    force=True игнорирует внутрипроцессный дедуп. Возвращает число отправленных."""
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as s:
+        stale = rem.find_stale(s, now, settings.reminder_inactivity_hours,
+                               settings.reminder_skip_month_set)
+    dedupe = timedelta(hours=max(1, settings.reminder_inactivity_hours))
+    sent = 0
+    for item in stale:
+        prev = _last_reminded.get(item.statement_id)
+        if not force and prev and (now - prev) < dedupe:
+            continue
+        try:
+            await bot.send_message(
+                item.telegram_id,
+                f"🔔 Напоминание: по ведомости «{item.course_name}» вы не вносили оценки "
+                f"уже {rem.humanize_idle(item.idle)}. Загляните и продолжите заполнение — "
+                f"«✍️ Ввести оценки».",
+            )
+            _last_reminded[item.statement_id] = now
+            sent += 1
+        except Exception:
+            logging.exception("Не удалось отправить напоминание teacher_tg=%s", item.telegram_id)
+    return sent
+
+
+async def _reminders_loop(bot: Bot) -> None:
+    """Периодическая проверка неактивных ведомостей (интервал — из .env)."""
+    await asyncio.sleep(20)  # дать боту подняться
+    interval = max(5, settings.reminder_check_interval_min) * 60
+    while True:
+        try:
+            n = await _send_reminders(bot)
+            if n:
+                logging.info("Отправлено напоминаний: %s", n)
+        except Exception:
+            logging.exception("Сбой цикла напоминаний")
+        await asyncio.sleep(interval)
+
+
+@dp.message(Command("remind_now"))
+async def on_remind_now(message: Message) -> None:
+    """Ручная проверка напоминаний (тест доставки). Игнорирует дедуп."""
+    sent = await _send_reminders(message.bot, force=True)
+    hrs = settings.reminder_inactivity_hours
+    tail = "" if sent else (
+        "\nНет ведомостей без активности дольше порога. Чтобы проверить доставку "
+        "прямо сейчас — временно поставьте REMINDER_INACTIVITY_HOURS=0 и повторите /remind_now."
+    )
+    await message.answer(
+        f"Проверка выполнена. Порог неактивности: {hrs} ч. Отправлено напоминаний: {sent}." + tail
+    )
+
+
 async def _run() -> None:
     if not settings.telegram_bot_token:
         raise SystemExit("Нет TELEGRAM_BOT_TOKEN в .env.")
     init_db()
     bot = Bot(token=settings.telegram_bot_token)
     await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(_reminders_loop(bot))  # контур 4: напоминания в фоне
     await dp.start_polling(bot)
 
 

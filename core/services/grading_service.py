@@ -24,6 +24,18 @@ def round_half_away(x: float, ndigits: int = 0) -> float:
     return y if x >= 0 else -y
 
 
+# --- Шкала оценок ВШЭ (10-балльная) ---
+# Единый источник границ для валидации ввода и детектора аномалий «вне диапазона».
+GRADE_MIN = 0.0
+GRADE_MAX = 10.0
+
+
+def element_max(element) -> float:
+    """Максимальный балл за элемент контроля. Пока шкала едина (10 баллов); поле
+    max_score у элемента — задел на будущее (разные шкалы), читается через getattr."""
+    return float(getattr(element, "max_score", None) or GRADE_MAX)
+
+
 ROUNDINGS = {
     # арифметическое (как в примере Excel)
     "arithmetic": lambda x: round_half_away(x, 0),
