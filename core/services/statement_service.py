@@ -143,6 +143,12 @@ def student_total(session: Session, statement: Statement, student: Student) -> G
     return compute(build_engine_scheme(session, statement), entries_for_student(session, statement, student))
 
 
+def teacher_statement_count(session: Session, teacher: Teacher) -> int:
+    return len(list(session.scalars(
+        select(Statement.id).where(Statement.teacher_id == teacher.id)
+    ).all()))
+
+
 def active_statement(session: Session, teacher: Teacher) -> Statement | None:
     """Последняя ведомость преподавателя в статусе «Заполняется»."""
     return session.scalar(

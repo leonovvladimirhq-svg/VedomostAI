@@ -30,7 +30,8 @@ Guidance for Claude Code when working in this repository. Комментарии
 ```
 core/
   models.py              # SQLAlchemy: Teacher, Group, Student, Statement, GradingScheme,
-                         #   ControlElement, GradeEntry, StudentStatus (append-only, lineage)
+                         #   ControlElement, GradeEntry, StudentStatus, ConsentRecord, Feedback
+  legal/consent_vedomost_v1.md  # текст согласия на обработку ПДн (152-ФЗ), версионируется
   statuses.py            # конечный автомат статусов ведомости
   db.py                  # engine/session (SQLite сейчас, Postgres позже — только DATABASE_URL)
   services/
@@ -39,6 +40,8 @@ core/
     grading_service.py   # ДВИЖОК: compute(Scheme, entries)->GradeResult; округления, блокирующие;
                          #   шкала GRADE_MIN/GRADE_MAX + element_max (валидация «вне диапазона»)
     reminder_service.py  # контур 4: find_stale() — неактивные ведомости для напоминаний
+    consent_service.py   # согласие ПДн (152-ФЗ): версия, summary, SHA-256, needs/record, forget_me
+    feedback_service.py  # обратная связь преподавателя (👍/👎 + комментарий), агрегаты
   parsing/
     pud_ingest.py        # извлечение текста из файла ПУД (PDF/DOCX/HTML/TXT) + поиск формулы
     pud_parser.py        # разбор строки формулы «Актив*0.1+...» -> Scheme (детерминированно)
@@ -93,6 +96,13 @@ getUpdates (ошибка 409). Разработка локально — без 
   месяцы-исключения `REMINDER_SKIP_MONTHS`; ручная проверка доставки — команда `/remind_now`.
 - ✅ Детектор аномалий, этап 1: жёсткая валидация «вне шкалы 0–10» при вводе (кнопки/текст/голос),
   ответ с максимумом за элемент (`grading_service.element_max`).
+- ✅ Согласие на ПДн (152-ФЗ, паттерн из TutorAI): на `/start` без согласия — двухэкранный флоу
+  (интро → краткое содержание + `.md` с SHA-256 → Согласен/Не согласен), аудит в `consent_records`,
+  права субъекта `/my_data` и `/forget_me`. Версия `consent_vedomost_v1` (оператор ШК ВШЭ; e-mail —
+  заглушка, вписать перед запуском).
+- ✅ Обратная связь: кнопка «💬 Оставить обратную связь» в меню + контекстная плашка 👍/👎 после
+  распознавания ПУД; необязательный комментарий; хранится в `feedback`.
+- ✅ Стартовое сообщение: принадлежность к ШК НИУ ВШЭ + ценность в 1–2 предложениях.
 - 🔜 Дальше: аномалии (пропуски/выбросы/«всем одно»), дашборд академрука, СЭВ, per-element `max_score`.
 
 ## Конвенции

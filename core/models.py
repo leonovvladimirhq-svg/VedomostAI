@@ -132,3 +132,31 @@ class StudentStatus(Base):
     student_id: Mapped[int] = mapped_column(ForeignKey("students.id"), index=True)
     marker: Mapped[str] = mapped_column(String(30))  # напр. "academ"
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ConsentRecord(Base):
+    """Аудит согласий на обработку ПДн (152-ФЗ). APPEND-ONLY: каждое действие —
+    новая строка. Актуальность = последняя запись со status='accepted' по текущей
+    версии документа (см. core/services/consent_service.py)."""
+    __tablename__ = "consent_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, index=True)
+    doc_version: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16))  # accepted | declined | revoked
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class Feedback(Base):
+    """Обратная связь преподавателя: 👍/👎 + необязательный комментарий.
+    context — где оставлена (menu | pud | totals); ref_id — привязка (напр. statement_id)."""
+    __tablename__ = "feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    teacher_id: Mapped[int | None] = mapped_column(ForeignKey("teachers.id"), nullable=True, index=True)
+    telegram_id: Mapped[int] = mapped_column(Integer, index=True)
+    context: Mapped[str] = mapped_column(String(32), default="menu")
+    rating: Mapped[str] = mapped_column(String(8))  # up | down
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
