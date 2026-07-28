@@ -218,22 +218,43 @@ def _record_value(c: MaxClient, uid: int, chat: int, name: str, text: str) -> No
                          f"Продолжить ввод — выберите элемент:", buttons=elements_kb(els))
 
 
+def _sniff_ext(data: bytes, fname: str) -> str:
+    """Определяем формат по содержимому (MAX может не сохранить расширение)."""
+    if data[:4] == b"%PDF":
+        return ".pdf"
+    if data[:2] == b"PK":  # zip -> docx/xlsx
+        return ".docx"
+    low = data[:2048].lower()
+    if b"<html" in low or b"<!doctype html" in low or b"<head" in low:
+        return ".html"
+    ext = Path(fname).suffix.lower()
+    return ext if ext in (".html", ".htm", ".pdf", ".docx", ".txt", ".md") else ".txt"
+
+
 def _detect_from_file(c: MaxClient, uid: int, chat: int, att: dict) -> bool:
-    """Пробует скачать присланный файл ПУД и распознать формулу. True — обработано."""
+    """Скачивает присланный файл ПУД и распознаёт формулу. True — обработано."""
     payload = att.get("payload", {}) or {}
-    url = payload.get("url")
-    fname = att.get("filename") or "pud.bin"
+    url = payload.get("url") or payload.get("file_url")
+    fname = (att.get("filename") or att.get("name")
+             or payload.get("filename") or payload.get("name") or "pud")
+    log.info("ПУД-файл: fname=%r att_keys=%s payload_keys=%s has_url=%s",
+             fname, list(att.keys()), list(payload.keys()), bool(url))
     if not url:
-        log.info("ПУД-вложение без url: %s", json.dumps(att, ensure_ascii=False)[:400])
-        return False
+        log.info("ПУД-вложение без url: %s", json.dumps(att, ensure_ascii=False)[:500])
+        c.send_message(chat, "Не смог получить ссылку на файл. Пришлите формулу текстом.")
+        return True
     try:
         data = c.download(url)
-        tmp = Path(tempfile.gettempdir()) / f"maxpud_{uid}_{fname}"
+        ext = _sniff_ext(data, fname)
+        tmp = Path(tempfile.gettempdir()) / f"maxpud_{uid}{ext}"
         tmp.write_bytes(data)
         text = extract_text(str(tmp))
         tmp.unlink(missing_ok=True)
+        log.info("ПУД-файл прочитан: %s байт, ext=%s -> %s символов, формула=%s",
+                 len(data), ext, len(text), bool(find_formula(text)))
     except Exception as e:
-        c.send_message(chat, f"Не смог прочитать файл: {e}")
+        log.exception("Ошибка чтения ПУД-файла")
+        c.send_message(chat, f"Не смог прочитать файл ({e}). Пришлите формулу текстом.")
         return True
     _present_detected(c, uid, chat, text)
     return True
