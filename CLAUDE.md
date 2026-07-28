@@ -48,7 +48,9 @@ core/
     text_parser.py       # ЗАГЛУШКА: разбор текста-потока оценок (Qwen) — TODO
     voice.py             # ЗАГЛУШКА: транскрипция голоса (SpeechKit) — TODO
   export/excel.py        # генерация .xlsx (build_ledger_from_statement)
-bot/main.py              # aiogram 3: FSM-поток (ПУД -> подтверждение -> ввод -> экспорт)
+bot/main.py              # aiogram 3 (Telegram): FSM-поток (ПУД -> подтверждение -> ввод -> экспорт)
+bot/max_client.py        # тонкий клиент MAX Bot API (botapi.max.ru): updates/messages/answers/uploads
+bot/max_main.py          # транспорт MAX (МАКС): синхронный long-poll, переиспускает core/services
 seed/test_group.py       # 20 выдуманных студентов (без ПДн)
 tests/test_grading.py    # тесты движка (в т.ч. сверка с реальным Excel «число-в-число»)
 ```
@@ -103,6 +105,11 @@ getUpdates (ошибка 409). Разработка локально — без 
 - ✅ Обратная связь: кнопка «💬 Оставить обратную связь» в меню + контекстная плашка 👍/👎 после
   распознавания ПУД; необязательный комментарий; хранится в `feedback`.
 - ✅ Стартовое сообщение: принадлежность к ШК НИУ ВШЭ + ценность в 1–2 предложениях.
+- 🟡 Порт в MAX (МАКС): `bot/max_main.py` — отдельный транспорт (токен `MAX_BOT_TOKEN`), НЕ трогает
+  Telegram. API MAX проверен вживую (send text/html, инлайн-кнопки, `message_created`/`message_callback`,
+  `/answers`). Слой 1 готов: согласие 152-ФЗ + меню + обратная связь + `/my_data` `/forget_me`.
+  Слой 2 (TODO): приём ПУД файлом, ввод оценок, выгрузка .xlsx (нужен `POST /uploads`). На VM —
+  сервис `vedomost-max-bot`.
 - 🔜 Дальше: аномалии (пропуски/выбросы/«всем одно»), дашборд академрука, СЭВ, per-element `max_score`.
 
 ## Конвенции

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Яндекс.Диск (авто-выгрузка ведомости как редактируемой таблицы в Яндекс Документах)
     yandex_disk_token: str = Field(default="", validation_alias="YANDEX_DISK_TOKEN")
 
+    # MAX (МАКС) Bot API — параллельный транспорт (bot/max_main.py), не трогает Telegram.
+    max_bot_token: str = Field(default="", validation_alias="MAX_BOT_TOKEN")
+
     # Напоминания преподавателю по неактивным ведомостям (контур 4).
     # Прод-порог = 240 ч (10 дней); на тест ставим 24 (см. .env на VM).
     reminder_inactivity_hours: int = Field(default=240, validation_alias="REMINDER_INACTIVITY_HOURS")
