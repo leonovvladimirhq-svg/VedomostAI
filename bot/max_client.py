@@ -56,12 +56,44 @@ class MaxClient:
         r.raise_for_status()
         return r.json()
 
-    def answer_callback(self, callback_id: str, notification: str | None = None) -> dict:
-        """Аналог cb.answer(): короткое всплывающее уведомление на нажатие кнопки."""
-        body: dict = {}
-        if notification:
-            body["notification"] = notification
+    def answer_callback(self, callback_id: str, notification: str) -> dict:
+        """Ответ на нажатие (аналог cb.answer). ВАЖНО: MAX требует непустой
+        notification — с пустым телом /answers отдаёт 400. Поэтому вызываем
+        только когда есть что показать (см. ack() в max_main)."""
         r = self._http.post(f"{self._base}/answers", headers=self._headers,
-                            params={"callback_id": callback_id}, json=body, timeout=20)
+                            params={"callback_id": callback_id},
+                            json={"notification": notification}, timeout=20)
         r.raise_for_status()
         return r.json()
+
+    def upload_file(self, path: str, filename: str,
+                    content_type: str = "application/octet-stream") -> str:
+        """Двухшаговая загрузка файла в MAX -> token для вложения."""
+        r1 = self._http.post(f"{self._base}/uploads", headers=self._headers,
+                            params={"type": "file"}, timeout=30)
+        r1.raise_for_status()
+        url = r1.json()["url"]
+        with open(path, "rb") as f:
+            r2 = self._http.post(url, files={"data": (filename, f, content_type)}, timeout=120)
+        r2.raise_for_status()
+        return r2.json()["token"]
+
+    def send_document(self, chat_id: int, path: str, filename: str, caption: str = "") -> dict:
+        """Загружает и отправляет файл. Вложение может «дозревать» — ретраим на 400."""
+        import time
+        token = self.upload_file(path, filename)
+        body = {"text": caption, "attachments": [{"type": "file", "payload": {"token": token}}]}
+        r = None
+        for _ in range(6):
+            r = self._http.post(f"{self._base}/messages", headers=self._headers,
+                               params={"chat_id": chat_id}, json=body, timeout=40)
+            if r.status_code == 200:
+                return r.json()
+            time.sleep(2)
+        r.raise_for_status()
+        return {}
+
+    def download(self, url: str) -> bytes:
+        r = self._http.get(url, timeout=60)
+        r.raise_for_status()
+        return r.content
