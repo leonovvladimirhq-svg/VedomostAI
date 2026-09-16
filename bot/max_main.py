@@ -522,7 +522,11 @@ def handle_callback(c: MaxClient, uid: int, chat: int, name: str, payload: str, 
         if not els:
             c.send_message(chat, "Сначала создайте ведомость — «📄 Новая ведомость».")
         else:
-            c.send_message(chat, "Выберите элемент контроля:", buttons=elements_kb(els))
+            c.send_message(chat, "Выберите элемент контроля — или сразу напишите пачкой: "
+                                 "«за тест Иванов 8, Петров 5».\n"
+                                 "🎙 Голос: надиктуйте в МАКС и нажмите значок →T (транскрипция), "
+                                 "затем пришлите получившийся текст — я разберу его так же.",
+                           buttons=elements_kb(els))
     elif payload.startswith("el:"):
         STATE[uid] = {"flow": "picking_student", "element_id": int(payload.split(":")[1])}
         from core.models import Group
