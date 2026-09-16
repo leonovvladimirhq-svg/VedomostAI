@@ -17,10 +17,12 @@ class STTError(Exception):
     pass
 
 
-def transcribe(audio_bytes: bytes, *, lang: str = "ru-RU") -> str:
+def transcribe(audio_bytes: bytes, *, lang: str = "ru-RU", fmt: str = "oggopus") -> str:
     if not settings.ai_api_key:
         raise STTError("Не задан YC_API_KEY.")
-    params = {"folderId": settings.stt_folder_id, "lang": lang, "format": "oggopus"}
+    # SpeechKit STT v1 понимает: oggopus, mp3, lpcm. Telegram шлёт oggopus; MAX —
+    # определяем по содержимому (см. вызывающий код), иначе пробуем oggopus.
+    params = {"folderId": settings.stt_folder_id, "lang": lang, "format": fmt}
     r = httpx.post(_ENDPOINT, params=params,
                    headers={"Authorization": f"Api-Key {settings.ai_api_key}"},
                    content=audio_bytes, timeout=60)

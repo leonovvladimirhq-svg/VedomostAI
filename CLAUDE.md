@@ -109,7 +109,9 @@ getUpdates (ошибка 409). Разработка локально — без 
   Telegram. API MAX проверен вживую (send text/html, инлайн-кнопки, `message_created`/`message_callback`,
   `/answers`, `/uploads`+отправка файла). Готов сквозной сценарий: согласие 152-ФЗ → меню → **новая
   ведомость (ПУД файлом/формулой) → ввод оценок (элемент→студент→балл, валидация 0–10) → показ →
-  выгрузка .xlsx** → обратная связь, `/my_data` `/forget_me`. На VM — сервис `vedomost-max-bot`
+  выгрузка .xlsx** → обратная связь, `/my_data` `/forget_me`. Голос (SpeechKit) и текст-поток
+  оценок («за тест Иванов 8») → Qwen-разбор → подтверждение → запись; формат аудио MAX определяется
+  по содержимому (`_audio_format`, oggopus/mp3). На VM — сервис `vedomost-max-bot`
   (`git pull && sudo systemctl restart vedomost-max-bot`). Приём ПУД файлом — best-effort по
   `attachment.payload.url` (проверить на живом файле). ⚠️ `/answers` требует непустой `notification`.
 - 🔜 Дальше: аномалии (пропуски/выбросы/«всем одно»), дашборд академрука, СЭВ, per-element `max_score`.

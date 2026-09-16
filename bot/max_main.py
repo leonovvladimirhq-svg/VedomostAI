@@ -20,6 +20,8 @@ from core.db import SessionLocal, init_db
 from core.export.excel import build_ledger_from_statement
 from core.parsing.pud_ingest import extract_text, find_formula, find_title
 from core.parsing.pud_parser import parse_formula
+from core.parsing.text_parser import parse_grades
+from core.parsing.voice import transcribe
 from core.services import consent_service as consent
 from core.services import feedback_service as fb
 from core.services import statement_service as svc
@@ -87,6 +89,13 @@ PUD_NOT_FOUND = (
     "Не нашёл формулу оценивания. Пришлите раздел «Система оценивания» текстом "
     "или другой файл (PDF/DOCX/HTML)."
 )
+VOICE_RECOGNIZING = "🎙 Распознаю голос…"
+VOICE_EMPTY = "🎙 Не удалось распознать речь. Повторите чётче или введите оценки текстом."
+VOICE_DISABLED = "Голосовой ввод недоступен: не настроен ключ ИИ (YC_API_KEY)."
+GRADES_NONE = (
+    "Не разобрал оценки. Пример: «за тест Иванов 8, Петров 3». Проверьте, что создана "
+    "ведомость и названы существующие студенты и элементы контроля."
+)
 
 
 # --- Клавиатуры (список рядов из button()) ---
@@ -128,6 +137,10 @@ def feedback_skip_kb() -> list[list[dict]]:
 
 def pud_confirm_kb() -> list[list[dict]]:
     return [[button("✅ Подтвердить и создать", "pud_ok")], [button("✖️ Отмена", "pud_cancel")]]
+
+
+def grades_confirm_kb() -> list[list[dict]]:
+    return [[button("✅ Записать", "grades_ok")], [button("✖️ Отмена", "grades_cancel")]]
 
 
 def elements_kb(elements) -> list[list[dict]]:
@@ -260,12 +273,107 @@ def _detect_from_file(c: MaxClient, uid: int, chat: int, att: dict) -> bool:
     return True
 
 
+def _audio_format(data: bytes) -> str:
+    """Определяем формат аудио для SpeechKit (oggopus | mp3). По умолчанию oggopus."""
+    if data[:4] == b"OggS":
+        return "oggopus"
+    if data[:3] == b"ID3" or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "mp3"
+    return "oggopus"
+
+
+def _handle_grades(c: MaxClient, uid: int, chat: int, name: str, text: str, source: str) -> None:
+    """Разбор реплики оценок (Qwen) -> сопоставление с БД -> подтверждение. Общий для голоса и текста."""
+    from core.models import Group
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, uid, name or "")
+        st = svc.active_statement(s, teacher)
+        if st is None:
+            c.send_message(chat, "Сначала создайте ведомость — «📄 Новая ведомость».")
+            return
+        group = s.get(Group, st.group_id)
+        roster_names = [x.full_name for x in svc.roster(s, group)]
+        el_names = [e.name for e in svc.scheme_elements(s, st)]
+    try:
+        parsed = parse_grades(text, roster_names, el_names)
+    except Exception as e:
+        log.exception("parse_grades failed")
+        c.send_message(chat, f"Не смог распознать оценки: {e}")
+        return
+
+    resolved, labels, rejected = [], [], []
+    with SessionLocal() as s:
+        teacher = svc.get_or_create_teacher(s, uid, name or "")
+        st = svc.active_statement(s, teacher)
+        group = s.get(Group, st.group_id)
+        students = svc.roster(s, group)
+        elements = svc.scheme_elements(s, st)
+        for p in parsed:
+            stu = svc.match_student(students, p.student)
+            el = svc.match_element(elements, p.element)
+            if not (stu and el):
+                continue
+            emax = element_max(el)
+            if GRADE_MIN <= p.value <= emax:
+                resolved.append((stu.id, el.id, p.value))
+                labels.append(f"• {stu.full_name.split()[0]} — {el.name} = {p.value:g}")
+            else:
+                rejected.append(f"• {stu.full_name.split()[0]} — {el.name}: {p.value:g} вне 0–{emax:g}")
+
+    if not resolved:
+        note = ("\n\n⚠️ Вне шкалы:\n" + "\n".join(rejected)) if rejected else ""
+        c.send_message(chat, GRADES_NONE + note)
+        return
+    STATE[uid] = {"flow": "confirming_grades", "pending": resolved, "source": source}
+    head = f"🗣 Распознал: «{text}»\n\n" if source == "voice" else ""
+    tail = ("\n\n⚠️ Вне шкалы (не запишу):\n" + "\n".join(rejected)) if rejected else ""
+    c.send_message(chat, head + "Записать эти оценки?\n" + "\n".join(labels) + tail,
+                   buttons=grades_confirm_kb())
+
+
+def _handle_voice(c: MaxClient, uid: int, chat: int, name: str, att: dict) -> None:
+    """Голосовое -> SpeechKit -> разбор оценок. Формат аудио определяем по содержимому."""
+    if not settings.ai_enabled:
+        c.send_message(chat, VOICE_DISABLED)
+        return
+    payload = att.get("payload", {}) or {}
+    url = payload.get("url") or payload.get("file_url")
+    log.info("voice att: type=%s att_keys=%s payload_keys=%s has_url=%s",
+             att.get("type"), list(att.keys()), list(payload.keys()), bool(url))
+    if not url:
+        log.info("voice-вложение без url: %s", json.dumps(att, ensure_ascii=False)[:500])
+        c.send_message(chat, "Не смог получить аудио. Введите оценки текстом.")
+        return
+    c.send_message(chat, VOICE_RECOGNIZING)
+    try:
+        audio = c.download(url)
+        fmt = _audio_format(audio)
+        log.info("voice: %s байт, магия=%r -> формат=%s", len(audio), audio[:4], fmt)
+        text = transcribe(audio, fmt=fmt)
+    except Exception as e:
+        log.exception("voice transcribe failed")
+        c.send_message(chat, f"Не смог распознать голос: {e}")
+        return
+    if not text.strip():
+        c.send_message(chat, VOICE_EMPTY)
+        return
+    _handle_grades(c, uid, chat, name, text, "voice")
+
+
 def handle_message(c: MaxClient, uid: int, chat: int, name: str, text: str,
                    attachments: list[dict]) -> None:
     text = (text or "").strip()
     st = STATE.get(uid, {})
     flow = st.get("flow")
     file_atts = [a for a in (attachments or []) if a.get("type") == "file"]
+    audio_atts = [a for a in (attachments or []) if str(a.get("type", "")).lower() in ("audio", "voice")]
+    if attachments:
+        log.info("attachments types: %s", [a.get("type") for a in attachments])
+
+    # 0) голосовое сообщение -> SpeechKit -> разбор оценок (в любом состоянии)
+    if audio_atts:
+        _handle_voice(c, uid, chat, name, audio_atts[0])
+        return
 
     # 1) комментарий обратной связи
     if flow == "feedback_comment":
@@ -298,6 +406,9 @@ def handle_message(c: MaxClient, uid: int, chat: int, name: str, text: str,
         c.send_message(chat, MY_DATA.format(uid=uid, consent=cons, statements=n_st))
     elif text == "/forget_me":
         c.send_message(chat, FORGET_ME_CONFIRM, buttons=forget_kb())
+    elif settings.ai_enabled and any(ch.isdigit() for ch in text):
+        # текст-поток оценок: «за тест Иванов 8, Петров 3»
+        _handle_grades(c, uid, chat, name, text, "text")
     else:
         c.send_message(chat, "Наберите /start для меню, затем «📄 Новая ведомость» — пришлёте ПУД.")
 
@@ -360,6 +471,25 @@ def handle_callback(c: MaxClient, uid: int, chat: int, name: str, payload: str, 
     elif payload == "fb:skip":
         STATE.pop(uid, None)
         c.send_message(chat, FEEDBACK_THANKS)
+    # --- Подтверждение распознанных оценок (голос/текст) ---
+    elif payload == "grades_ok":
+        data = STATE.get(uid, {})
+        pending, source = data.get("pending", []), data.get("source", "text")
+        STATE.pop(uid, None)
+        from core.models import ControlElement, Student
+        recorded = 0
+        with SessionLocal() as s:
+            teacher = svc.get_or_create_teacher(s, uid, name or "")
+            st = svc.active_statement(s, teacher)
+            for sid, eid, val in pending:
+                svc.add_grade_entry(s, st, s.get(Student, sid), s.get(ControlElement, eid),
+                                    val, source, teacher)
+                recorded += 1
+        ack("Записал")
+        c.send_message(chat, f"✅ Записано оценок: {recorded}.", buttons=main_menu())
+    elif payload == "grades_cancel":
+        STATE.pop(uid, None)
+        c.send_message(chat, "Отменил. /start — меню.")
     # --- Новая ведомость (ПУД) ---
     elif payload == "new":
         STATE[uid] = {"flow": "waiting_pud"}
