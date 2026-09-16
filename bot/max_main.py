@@ -578,16 +578,25 @@ def handle_update(c: MaxClient, u: dict) -> None:
     if t == "bot_started":
         handle_start(c, u["user"]["user_id"], u["chat_id"], u["user"].get("name", ""))
     elif t == "message_created":
-        m = u["message"]
+        m = u.get("message")
+        if not m:
+            # у голосовых MAX структура иная — логируем сырой апдейт, чтобы разобраться
+            log.info("message_created без 'message': %s", json.dumps(u, ensure_ascii=False)[:1800])
+            return
         sender = m.get("sender", {})
         body = m.get("body", {})
-        handle_message(c, sender.get("user_id"), m["recipient"]["chat_id"],
-                       sender.get("name", ""), body.get("text", "") or "",
-                       body.get("attachments", []) or [])
+        atts = body.get("attachments", []) or []
+        if atts:
+            log.info("message_created attachments: %s", json.dumps(atts, ensure_ascii=False)[:1800])
+        chat_id = (m.get("recipient", {}) or {}).get("chat_id") or u.get("chat_id")
+        handle_message(c, sender.get("user_id"), chat_id,
+                       sender.get("name", ""), body.get("text", "") or "", atts)
     elif t == "message_callback":
         cb = u["callback"]
         handle_callback(c, cb["user"]["user_id"], u["message"]["recipient"]["chat_id"],
                         cb["user"].get("name", ""), cb.get("payload", ""), cb.get("callback_id"))
+    else:
+        log.info("необработанный update_type=%s: %s", t, json.dumps(u, ensure_ascii=False)[:800])
 
 
 def run() -> None:
