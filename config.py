@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # Месяцы без напоминаний (напр. лето): "6,8". Пусто = напоминаем всегда (для теста).
     reminder_skip_months: str = Field(default="", validation_alias="REMINDER_SKIP_MONTHS")
 
+    # Дашборд мониторинга проектов (http://89.169.146.175:8080). Пусто = ничего не шлём.
+    dashboard_url: str = Field(default="", validation_alias="DASHBOARD_URL")
+    dashboard_token: str = Field(default="", validation_alias="DASHBOARD_TOKEN")
+
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_api_key)

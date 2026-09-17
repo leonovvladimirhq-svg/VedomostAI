@@ -23,6 +23,7 @@ from core.parsing.pud_parser import parse_formula
 from core.parsing.text_parser import parse_grades
 from core.parsing.voice import transcribe
 from core.services import consent_service as consent
+from core.services import telemetry_service as telemetry
 from core.services import feedback_service as fb
 from core.services import statement_service as svc
 from core.services.grading_service import GRADE_MIN, element_max
@@ -618,10 +619,19 @@ def run() -> None:
         except Exception:
             log.exception("Ошибка get_updates"); time.sleep(3); continue
         for u in updates:
+            # Телеметрия в общий дашборд: категория действия (без ПДн), кто, сколько
+            # заняло, упало ли. Отправка в фоне — на скорость ответа не влияет.
+            uid, uname, action = telemetry.label_for_update(u)
+            t0 = time.monotonic()
             try:
                 handle_update(c, u)
-            except Exception:
+            except Exception as e:
                 log.exception("Ошибка обработки апдейта %s", u.get("update_type"))
+                telemetry.track(uid, action, f"Ошибка: {type(e).__name__}", status="error",
+                                latency_ms=int((time.monotonic() - t0) * 1000), user_name=uname)
+            else:
+                telemetry.track(uid, action, latency_ms=int((time.monotonic() - t0) * 1000),
+                                user_name=uname)
 
 
 if __name__ == "__main__":
